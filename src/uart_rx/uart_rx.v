@@ -1,14 +1,16 @@
 `timescale 1ns/1ns
 
 module uart_rx
+#(
+    parameter CLK_FREQ = 100000000,
+    parameter BAUD_RATE = 2000000
+)
 (
     input clk,
     input rst_n,
     input rx,                   // UART RX
-    input baud_clk,             // Sampling clock
     output reg [7:0] rx_data_o, // Received byte out
-    output reg rx_data_valid,   // Whether the value at rx_data_o is valid
-    output baud_rst             // For disabling baudgen during IDLE
+    output reg rx_data_valid   // Whether the value at rx_data_o is valid
 );
     // Start & Stop bit defines for better readability
     localparam START = 1'b0;
@@ -22,6 +24,9 @@ module uart_rx
     localparam FSM_DONE = 8'd8;
     localparam FSM_ERR = 8'd16;
 
+    // How many clk ticks there are in one baud period
+    localparam CLK_SAMPLE_TICKS = (CLK_FREQ / BAUD_RATE);
+
     // FSM state regs
     (* mark_debug = "true" *) reg [7:0] rx_fsm_state;
     reg [7:0] rx_fsm_state_next;
@@ -30,10 +35,10 @@ module uart_rx
     reg [7:0] data_bits;
 
     // Data bit counter
-    reg [3:0] rx_bit_cnt;
+    (* mark_debug = "true" *) reg [3:0] rx_bit_cnt;
 
     // Sample counter
-    reg [3:0] sample_cnt;
+    (* mark_debug = "true" *) reg [15:0] sample_cnt;
 
     // FSM state transition
     always @(posedge clk)
@@ -48,13 +53,13 @@ module uart_rx
     // Sample counter
     always @(posedge clk)
     begin
-        // Reset counter on reset OR FSM is IDLE 
-        if(!rst_n || (rx_fsm_state==FSM_IDLE /*&& rx==START*/))
-            sample_cnt <= 4'd0;
-        else if(baud_clk==1'b1)
-            sample_cnt <= sample_cnt + 1;
+        // Reset counter on reset OR FSM is IDLE OR sample_cnt reached specified max value 
+        /* verilator lint_off WIDTH */
+        if(!rst_n || (rx_fsm_state==FSM_IDLE /*&& rx==START*/) || sample_cnt==CLK_SAMPLE_TICKS-1)
+        /* verilator lint_on WIDTH */
+            sample_cnt <= 16'd0;
         else
-            sample_cnt <= sample_cnt;
+            sample_cnt <= sample_cnt + 1;
     end
 
     // Next state logic
@@ -70,10 +75,10 @@ module uart_rx
                 end
             end
             FSM_START_BIT: begin
-                // Wait for a full baud period for synchronization
-                // We check for baud_clk==1 here, because we want the transition
-                // to happen synchronously with the baud sample pulse as well
-                if(baud_clk==1'b1 && sample_cnt==4'd15) begin
+                // Wait until mid of START bit for synchronization
+                /* verilator lint_off WIDTH */
+                if(sample_cnt==CLK_SAMPLE_TICKS/2) begin
+                /* verilator lint_on WIDTH */
                     rx_fsm_state_next = FSM_DATA_BITS;
                 end else if(rx==START) begin
                     // Stay in START_BIT state if RX line still LOW
@@ -85,21 +90,20 @@ module uart_rx
             end
             FSM_DATA_BITS: begin
                 // Receive/Sample 8 data bits
-                if(baud_clk==1'b1 && rx_bit_cnt==4'd8) begin
+                if(rx_bit_cnt==4'd8) begin
                     rx_fsm_state_next = FSM_STOP_BIT;
                 end else begin
                     rx_fsm_state_next = FSM_DATA_BITS; 
                 end
             end
             FSM_STOP_BIT: begin
-                // Wait for one baud period of STOP bit
-                if(baud_clk==1'b1 && sample_cnt==4'd15) begin
+                // Wait until mid of STOP bit
+                /* verilator lint_off WIDTH */
+                if(sample_cnt==CLK_SAMPLE_TICKS/2) begin
+                /* verilator lint_on WIDTH */
                     rx_fsm_state_next = FSM_DONE;
-                end else if(rx==STOP) begin
-                    rx_fsm_state_next = FSM_STOP_BIT;
                 end else begin
-                    // If STOP bit was too short, go to error state
-                    rx_fsm_state_next = FSM_ERR; 
+                    rx_fsm_state_next = FSM_STOP_BIT; 
                 end
             end
             FSM_DONE: begin
@@ -121,10 +125,12 @@ module uart_rx
     always @(posedge clk)
     begin
         // Reset counter when stop bit has been received
-        if(!rst_n || rx_fsm_state==FSM_STOP_BIT)
+        if(!rst_n || rx_fsm_state==FSM_IDLE || rx_fsm_state==FSM_STOP_BIT)
             rx_bit_cnt <= 4'd0;
-        // Increment counter during RX at end of each data bit
-        else if(baud_clk==1'b1 && rx_fsm_state==FSM_DATA_BITS && sample_cnt==4'd15) begin
+        // Increment counter during RX at mid of each data bit
+        /* verilator lint_off WIDTH */
+        else if(rx_fsm_state==FSM_DATA_BITS && sample_cnt==CLK_SAMPLE_TICKS/2) begin
+        /* verilator lint_on WIDTH */
             rx_bit_cnt <= rx_bit_cnt + 1;
         end else begin
             rx_bit_cnt <= rx_bit_cnt; 
@@ -135,7 +141,9 @@ module uart_rx
     always @(posedge clk)
     begin
         // Check if sample point (= middle of data bit) has been reached
-        if(baud_clk==1'b1 && rx_fsm_state==FSM_DATA_BITS && sample_cnt==4'd7) begin
+        /* verilator lint_off WIDTH */
+        if(rx_fsm_state==FSM_DATA_BITS && sample_cnt==CLK_SAMPLE_TICKS/2) begin
+        /* verilator lint_on WIDTH */
             data_bits <= { data_bits[6:0], rx };
         end else begin
             data_bits <= data_bits; 
@@ -160,8 +168,5 @@ module uart_rx
             rx_data_valid = 0;
         end
     end
-
-    // Disable baudgen during IDLE
-    assign baud_rst = rx_fsm_state==FSM_IDLE;
 
 endmodule
